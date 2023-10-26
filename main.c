@@ -24,8 +24,10 @@
 
 #define THRESHOLD 300
 
-uint16_t t0;
-uint16_t t1;
+volatile uint16_t t0;
+volatile uint16_t t1;
+volatile bit bitReady;
+
 uint16_t t2;
 uint16_t dt0;
 uint16_t dt1;
@@ -40,7 +42,7 @@ bit _0;
 bit _1;
 
 uint8_t buffer[3];
-volatile bit dataReady;
+bit dataReady;
 
 uint8_t crcByte(uint8_t crc, uint8_t data) {
     uint8_t i = 8;
@@ -104,120 +106,22 @@ void reset(void) {
     waitData = 0;
     dc = 0;
     bc = 0;
+    bitReady = 0;
 }
 
 void interrupt globalInterrupt() {
     if (INTF) {
         INTF = 0;
-        if (!dataReady) {
-
+        if (!bitReady) {
             t0 = TMR1;
             while (DATA_IN);
-            t2 = TMR1;
-
-            if (pc > 0) {
-                if (t0 < t1) {
-                    dt1 = 0xFFFF - t1 + t0;
-                } else {
-                    dt1 = t0 - t1;
-                }
-            }
-
-            // check time after last bit
-            if (pc == 0 || (dt1 < (dt0 + dt0 + dt0) && dt1 > dt0 / 2)) {
-
-                t1 = t2;
-
-                if (t1 < t0) {
-                    dt1 = 0xFFFF - t0 + t1;
-                } else {
-                    dt1 = t1 - t0;
-                }
-
-                if (dt0 == 0) {
-                    dt0 = dt1;
-                    pc++;
-
-                } else {
-
-                    _0 = 0;
-                    _1 = 0;
-
-                    if (dt0 > dt1) {
-                        dif = dt0 - dt1;
-                    } else {
-                        dif = dt1 - dt0;
-                    }
-
-                    if (dif <= THRESHOLD) {
-                        _0 = 1;
-                    } else {
-                        if (2 * dt0 > dt1) {
-                            dif = 2 * dt0 - dt1;
-                        } else {
-                            dif = dt1 - 2 * dt0;
-                        }
-
-                        if (dif <=  2 * THRESHOLD) {
-                            _1 = 1;
-                        }
-                    }
-
-                    if (waitData == 1) {
-
-                        bc = dc >> 3; // dc / 8 -> index of buffer array
-
-                        if (_0) {
-                            // rx 0
-                            buffer[bc] = buffer[bc] << 1;
-                            dc++;
-                        } else if (_1) {
-                            // rx 1
-                            buffer[bc] = (buffer[bc] << 1) + 1;
-                            dc++;
-                        } else {
-                            // error
-                            buffer[0] = 0;
-                            buffer[1] = 0;
-                            buffer[2] = 0;
-                            reset();
-                        }
-
-                        if (dc == 24) {
-                            waitData = 0;
-                            dataReady = 1;
-                        }
-
-                    } else {
-                        if (pc > 10 && _1) {
-                            // start bit detected
-                            waitData = 1;
-
-                        } else if (_0) {
-                            dt0 = (dt0 + dt1) / 2;
-                            //dt0 = dt1;
-                            pc++;
-
-                        } else {
-                            //error
-                            reset();
-                        }
-                    }
-                }
-            } else {
-                reset();
-            }
+            t1 = TMR1;
+            bitReady = 1;
         }
-
-        //        OUT_1 = 0;
-        //        OUT_2 = 0;
-        //        OUT_3 = 0;
-
     }
 }
 
-void main() {
-
+void setup() {
     CMCON = 0x07; // Shut off the Comparator
     VRCON = 0x00; // Shut off the Voltage Reference
     //    ANSEL = 0;
@@ -247,7 +151,118 @@ void main() {
     reset();
     GIE = 1; // enable global interrupts
 
+}
+
+void processBit() {
+
+    if (pc > 0) {
+        if (t0 < t2) {
+            dt1 = 0xFFFF - t2 + t0;
+        } else {
+            dt1 = t0 - t2;
+        }
+    }
+
+    // check time after last bit
+    if (pc == 0 || (dt1 < (dt0 + dt0 + dt0) && dt1 > dt0 / 2)) {
+
+        t2 = t1;
+
+        if (t1 < t0) {
+            dt1 = 0xFFFF - t0 + t1;
+        } else {
+            dt1 = t1 - t0;
+        }
+
+        if (dt0 == 0) {
+            dt0 = dt1;
+            pc++;
+
+        } else {
+
+            _0 = 0;
+            _1 = 0;
+
+            if (dt0 > dt1) {
+                dif = dt0 - dt1;
+            } else {
+                dif = dt1 - dt0;
+            }
+
+            if (dif <= THRESHOLD) {
+                _0 = 1;
+            } else { 
+                if (2 * dt0 > dt1) {
+                    dif = 2 * dt0 - dt1;
+                } else {
+                    dif = dt1 - 2 * dt0;
+                }
+
+                if (dif <= 2 * THRESHOLD) {
+                    _1 = 1;
+                }
+            }
+
+            if (waitData == 1) {
+
+                bc = dc >> 3; // dc / 8 -> index of buffer array
+
+                if (_0) {
+                    // rx 0
+                    buffer[bc] = buffer[bc] << 1;
+                    dc++;
+                } else if (_1) {
+                    // rx 1
+                    buffer[bc] = (buffer[bc] << 1) + 1;
+                    dc++;
+                } else {
+                    // error
+                    buffer[0] = 0;
+                    buffer[1] = 0;
+                    buffer[2] = 0;
+                    reset();
+                }
+
+                if (dc == 24) {
+                    waitData = 0;
+                    dataReady = 1;
+                }
+
+            } else {
+                if (pc > 10 && _1) {
+                    // start bit detected
+                    waitData = 1;
+
+                } else if (_0) {
+                    dt0 = (dt0 + dt1) / 2;
+                    //dt0 = dt1;
+                    if (pc < 200)pc++;
+
+                } else {
+                    //error
+                    reset();
+                }
+            }
+        }
+    } else {
+        reset();
+    }
+//    OUT_1 = 0;
+//    OUT_2 = 0;
+//    OUT_3 = 0;
+    bitReady = 0;
+
+}
+
+void main() {
+
+    setup();
+
     while (1) {
+
+        if (!dataReady && bitReady) {
+            processBit();
+        }
 
         if (dataReady) {
             GIE = 0;
@@ -286,7 +301,7 @@ void main() {
             __delay_ms(2000);
             reset();
             GIE = 1;
+
         }
     }
 }
-
