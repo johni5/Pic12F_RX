@@ -9,6 +9,8 @@
 
 #include "includes.h"
 
+//#define LOGGING 1
+
 #define ADDR_MIN_PC 1
 #define ADDR_MAX_PC 2
 #define ADDR_LAST_PC 3
@@ -16,7 +18,7 @@
 #define ADDR_ERR_PC 6
 
 __EEPROM_DATA(
-        0x05, // version
+        0x06, // version
         0x00, // min pc
         0x00, // max pc (best value 80)
         0x00, // last pc
@@ -28,10 +30,23 @@ __EEPROM_DATA(
 
 /* Pin configuration */
 
-#define DATA_IN GP2
+#define DATA_IN GP3
 #define OUT_1 GP5
 #define OUT_2 GP4
-#define PWR_ON GP1
+#define LED_R GP2
+#define LED_G GP1
+#define LED_B GP0
+
+#define SET_BLACK LED_R=0;LED_G=0;LED_B=0;
+#define SET_WHITE LED_R=1;LED_G=1;LED_B=1;
+#define SET_BLUE LED_R=0;LED_G=0;LED_B=1;
+#define SET_LBLUE LED_R=0;LED_G=1;LED_B=1;
+#define SET_GREEN LED_R=0;LED_G=1;LED_B=0;
+#define SET_YELLOW LED_R=1;LED_G=1;LED_B=0;
+#define SET_PINK LED_R=1;LED_G=0;LED_B=1;
+#define SET_RED LED_R=1;LED_G=0;LED_B=0;
+
+#define LED_ON LED_R | LED_G | LED_B
 
 #define DATA_LEN 3
 
@@ -47,6 +62,7 @@ uint16_t dt1;
 uint16_t ticker;
 
 uint8_t pc; // preambule counter best is 80 = (10 * 8)
+volatile uint8_t _pc;
 uint8_t dc; // data bits counter
 uint8_t bc; // buffer counter
 
@@ -56,6 +72,46 @@ uint8_t mode;
 uint8_t start_byte;
 uint8_t current_bit;
 bit last_bit;
+
+typedef union {
+
+    struct {
+        uint8_t LOW_BYTE;
+        uint8_t HIGH_BYTE;
+    } refined8;
+
+    uint16_t raw;
+} count_PC;
+
+#ifdef LOGGING
+uint8_t _min;
+uint8_t _max;
+count_PC countPC;
+#endif
+
+void showPcLevel() {
+    if (_pc < 20) {
+        SET_RED
+        return;
+    }
+    if (_pc < 40) {
+        SET_PINK
+        return;
+    }
+    if (_pc < 50) {
+        SET_YELLOW
+        return;
+    }
+    if (_pc < 60) {
+        SET_GREEN
+        return;
+    }
+    if (_pc < 70) {
+        SET_LBLUE;
+        return;
+    }
+    SET_BLUE;
+}
 
 uint8_t crcByte(uint8_t crc, uint8_t data) {
     uint8_t i = 8;
@@ -90,16 +146,16 @@ void interrupt globalInterrupt() {
     if (T0IF) {
         ticker++;
 
-        if (PWR_ON) {
+        if (LED_ON) {
             if (ticker > 2) {
                 // about 200us
-                PWR_ON = 0;
+                SET_BLACK;
                 ticker = 0;
             }
         } else {
             if (ticker > 25) {
                 // about 1.7s
-                PWR_ON = 1;
+                showPcLevel();
                 ticker = 0;
             }
         }
@@ -137,22 +193,15 @@ uint8_t EEPROM_ReadByte(uint8_t addr) {
     return EEDATA;
 }
 
-typedef union {
-
-    struct {
-        uint8_t LOW_BYTE;
-        uint8_t HIGH_BYTE;
-    } refined8;
-
-    uint16_t raw;
-} count_PC;
-
-uint8_t _min;
-uint8_t _max;
-count_PC countPC;
+void delay_x100ms(uint8_t x) {
+    do {
+        __delay_ms(100);
+    } while (--x > 0);
+}
 
 void writePC() {
     if (pc > 0) {
+#ifdef LOGGING
         _min = EEPROM_ReadByte(ADDR_MIN_PC);
         _max = EEPROM_ReadByte(ADDR_MAX_PC);
         countPC.refined8.LOW_BYTE = EEPROM_ReadByte(ADDR_COUNT_PC);
@@ -173,6 +222,7 @@ void writePC() {
         }
         EEPROM_WriteByte(ADDR_COUNT_PC, countPC.refined8.LOW_BYTE);
         EEPROM_WriteByte(ADDR_LAST_PC, pc);
+#endif
     }
 }
 
@@ -222,7 +272,9 @@ void process_bit() {
             dc++;
             if (dc > (8 * DATA_LEN - 1)) {
                 mode = M_STOP;
+#ifdef LOGGING
                 writePC();
+#endif
             }
             break;
         case M_STOP:
@@ -255,10 +307,10 @@ void setup() {
     CMCON = 0x07; // Shut off the Comparator
     VRCON = 0x00; // Shut off the Voltage Reference
 
-    TRISIO = 0b00000100;
+    TRISIO = 0b00000000;
     GPIO = 0x00; // Make all pins 0
-    WPU = 0b00000100;
-    IOCB = 0b00000000; // interrupt for GP0
+    WPU = 0b00000000;
+    IOCB = 0b00000000; // interrupt for GPx
     INTEDG = 1; // 0 -> 1
 
     TMR1CS = 0; // TMR1 uses internal osc
@@ -270,6 +322,7 @@ void setup() {
     PS2 = 1;
     T0CS = 0;
     PSA = 0;
+    nGPPU = 0;
     T0IE = 1; // enable timer0 interrupts
     TMR0 = 0; // reset timer
 
@@ -299,6 +352,7 @@ void main() {
         read();
 
         if (mode == M_STOP) {
+            _pc = pc;
             uint8_t crc = 0;
             crc = crc8(buffer, 2);
 
@@ -306,34 +360,32 @@ void main() {
                 // CRC and address correct
                 switch (buffer[1]) {
                     case 1:
-                        if (OUT_1)
-                            OUT_1 = 0;
-                        else
-                            OUT_1 = 1;
+                        OUT_1 = ~OUT_1;
                         break;
                     case 2:
-                        if (OUT_2)
-                            OUT_2 = 0;
-                        else
-                            OUT_2 = 1;
+                        OUT_2 = ~OUT_2;
                         break;
                 }
             } else {
                 GIE = 0;
-                PWR_ON = 0;
+                SET_BLACK;
+                delay_x100ms(10);
+                uint8_t cnt;
+                for (cnt = 0; cnt < 5; cnt++) {
+                    SET_RED
+                    delay_x100ms(2);
+                    SET_BLACK;
+                    delay_x100ms(2);
+                }
+#ifdef LOGGING
                 uint8_t err = EEPROM_ReadByte(ADDR_ERR_PC);
                 err++;
                 EEPROM_WriteByte(ADDR_ERR_PC, err);
-                for (err = 0; err < 5; err++) {
-                    PWR_ON = 1;
-                    __delay_ms(150);
-                    PWR_ON = 0;
-                    __delay_ms(400);
-                }
-                PWR_ON = 0;
+#endif                
+                delay_x100ms(10);
                 GIE = 1;
             }
-            __delay_ms(2000);
+            delay_x100ms(20);
             reset();
         }
     }
