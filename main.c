@@ -9,6 +9,8 @@
 
 #include "includes.h"
 
+#define VERSION 0x07
+
 //#define LOGGING 1
 
 #define ADDR_MIN_PC 1
@@ -18,7 +20,7 @@
 #define ADDR_ERR_PC 6
 
 __EEPROM_DATA(
-        0x06, // version
+        VERSION, // version
         0x00, // min pc
         0x00, // max pc (best value 80)
         0x00, // last pc
@@ -55,14 +57,19 @@ __EEPROM_DATA(
 #define M_DATA 2
 #define M_STOP 3
 
+#define PC_ON pc_on = 1
+#define PC_OFF pc_on = 0
+
 uint16_t t0;
 uint16_t t1;
 uint16_t dt0;
 uint16_t dt1;
-uint16_t ticker;
+uint8_t ticker;
 
-uint8_t pc; // preambule counter best is 80 = (10 * 8)
+volatile uint8_t ticker_pc;
+volatile bit pc_on;
 volatile uint8_t _pc;
+volatile uint8_t pc; // preambule counter best is 80 = (10 * 8)
 uint8_t dc; // data bits counter
 uint8_t bc; // buffer counter
 
@@ -135,7 +142,6 @@ void reset(void) {
     dt1 = 0;
     dc = 0;
     bc = 0;
-    pc = 0;
     mode = M_PREAMBULE;
     start_byte = 0;
     last_bit = 0;
@@ -145,10 +151,19 @@ void reset(void) {
 void interrupt globalInterrupt() {
     if (T0IF) {
         ticker++;
+        ticker_pc++;
+
+        if (pc_on) {
+            if (ticker_pc > 3) {
+                //OUT_2 = ~OUT_2;
+                pc = 0;
+                PC_OFF;
+            }
+        }
 
         if (LED_ON) {
             if (ticker > 2) {
-                // about 200us
+                // about 200ms
                 SET_BLACK;
                 ticker = 0;
             }
@@ -244,8 +259,15 @@ void process_bit() {
     switch (mode) {
         case M_PREAMBULE:
 
+            if (!pc_on) {
+                PC_ON;
+                //OUT_2 = ~OUT_2;
+                ticker_pc = 0;
+                pc = 0;
+            }
             if (last_bit != current_bit) {
                 last_bit = current_bit;
+                ticker_pc = 0;
                 pc++;
             } else if (current_bit == 0) {
                 mode = M_START;
@@ -352,6 +374,7 @@ void main() {
         read();
 
         if (mode == M_STOP) {
+            PC_OFF;
             _pc = pc;
             uint8_t crc = 0;
             crc = crc8(buffer, 2);
